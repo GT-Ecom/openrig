@@ -1,0 +1,39 @@
+name: ci
+
+# Required check for main: the job NAME `test` is the ruleset's required status context, so
+# renaming this job (or adding a matrix, which renames it) blocks every merge to main.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # GitHub-hosted on purpose. This repository is a PUBLIC fork: a pull request from anyone runs
+    # this job, so it must never reach a self-hosted (homelab) runner. Hosted minutes are free for
+    # public repositories.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # The repo has no .nvmrc; the version comes from package.json `engines.node`
+          # (^20 || ^22 || ^24), so CI follows upstream when it changes the range.
+          node-version-file: package.json
+          # Hosted runners are ephemeral, so the npm cache pays for itself here.
+          cache: npm
+
+      - name: Install dependencies (locked)
+        run: npm ci
+
+      - name: Lint (typecheck all packages)
+        run: npm run lint
+
+      - name: Test
+        run: npm test
