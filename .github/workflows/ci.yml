@@ -25,7 +25,7 @@ jobs:
         with:
           # The repo has no .nvmrc; the version comes from package.json `engines.node`
           # (^20 || ^22 || ^24), so CI follows upstream when it changes the range.
-          node-version-file: package.json
+          node-version: "20"
           # Hosted runners are ephemeral, so the npm cache pays for itself here.
           cache: npm
 
