@@ -14,18 +14,20 @@ permissions:
 jobs:
   test:
     # GitHub-hosted on purpose. This repository is a PUBLIC fork: a pull request from anyone runs
-    # this job, so it must never reach a self-hosted (homelab) runner. Hosted minutes are free for
-    # public repositories.
-    runs-on: ubuntu-latest
+    # this job, so it must never reach a self-hosted (homelab) runner. Hosted minutes (macOS
+    # included) are free for public repositories. macOS, not Linux: upstream is developed on macOS
+    # and several daemon/cli tests assume its filesystem and process-table behaviour.
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          # The repo has no .nvmrc; the version comes from package.json `engines.node`
-          # (^20 || ^22 || ^24), so CI follows upstream when it changes the range.
-          node-version-file: package.json
+          # Pinned to 22, inside package.json `engines.node` (^20 || ^22 || ^24) and the same as
+          # upstream's portability-report.yml. Node 24 crashes better-sqlite3's native module in
+          # the vitest workers (run 36342065630).
+          node-version: "22"
           # Hosted runners are ephemeral, so the npm cache pays for itself here.
           cache: npm
 
