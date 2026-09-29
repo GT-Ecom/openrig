@@ -13,6 +13,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
+import { buildWrappedLaunch } from "./launch-wrapper.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
@@ -61,6 +62,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
+  /** Opt-in credential-fd delivery: an absolute path to an OAuth token FILE. When set, every
+   *  managed launch is typed through the launch wrapper, which opens the file on fd 3 for the
+   *  claude process only (CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3). Unset → commands unchanged. */
+  private credentialTokenFile: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -78,6 +83,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
+    /** Absolute path of an OAuth token file delivered on fd 3 (startup wires it from
+     *  OPENRIG_CLAUDE_OAUTH_TOKEN_FILE). Absent → launch commands are byte-identical. */
+    credentialTokenFile?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -89,6 +97,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
+    this.credentialTokenFile = deps.credentialTokenFile ?? null;
+  }
+
+  /** The exact text typed into the pane for a launch command. `cmd` is shell text (renderer env
+   *  prefix, a two-word posture flag, an already-quoted --model), so with a credential file it
+   *  runs under an inner `sh -c 'exec env <cmd>'` that parses it exactly as the pane shell would,
+   *  while the wrapper holds fd 3 open for the final exec. */
+  private launchText(cmd: string): string {
+    if (!this.credentialTokenFile) return cmd;
+    return buildWrappedLaunch({
+      argv: ["/bin/sh", "-c", "exec env " + cmd],
+      fds: [{ fd: 3, path: this.credentialTokenFile }],
+      env: { CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "3" },
+    });
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -256,7 +278,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const cmd = `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
-      const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+      const textResult = await this.tmux.sendText(binding.tmuxSession, this.launchText(cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -284,7 +306,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
       : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
-    const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+    const textResult = await this.tmux.sendText(binding.tmuxSession, this.launchText(cmd));
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }

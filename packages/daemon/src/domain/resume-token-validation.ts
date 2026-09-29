@@ -10,7 +10,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "grok_id";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -44,12 +44,17 @@ const PI_SESSION_FILE_CHARSET_RE = /^[A-Za-z0-9._/@-]+$/;
 const MAX_PI_SESSION_FILE_LEN = 1024;
 const PI_SESSION_FILE_SUFFIX = ".jsonl";
 
+// grok_id floor: the id-shaped floor plus UUID shape. A UUID-shaped `--resume` value is always an
+// id to grok, never a title, and it is typed into a pane, so nothing looser is accepted.
+const GROK_ID_RE = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+
 /** Resume-id type for a runtime, or null when the runtime has no resume token
  *  (terminal / unknown). */
 export function resumeTypeForRuntime(runtime: string | null): ResumeType | null {
   if (runtime === "claude-code") return "claude_id";
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
+  if (runtime === "grok") return "grok_id";
   return null;
 }
 
@@ -96,7 +101,7 @@ export function validateResumeToken(
   if (!resumeType) {
     return {
       ok: false,
-      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, and pi have resume tokens).`,
+      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, and grok have resume tokens).`,
     };
   }
   if (typeof rawToken !== "string") {
@@ -109,5 +114,9 @@ export function validateResumeToken(
   if (resumeType === "pi_session_file") {
     return validatePiSessionFileToken(token);
   }
-  return validateIdShapedToken(resumeType, token);
+  const idShaped = validateIdShapedToken(resumeType, token);
+  if (idShaped.ok && resumeType === "grok_id" && !GROK_ID_RE.test(token)) {
+    return { ok: false, error: "Grok session id must be a UUID (8-4-4-4-12 hex digits)." };
+  }
+  return idShaped;
 }

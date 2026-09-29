@@ -10,6 +10,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
   "codex": "codex --version",
   "pi": "pi --version",
+  "grok": "grok --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -141,7 +142,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "grok", "terminal", "stub"]);
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -402,6 +403,8 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     // launch-time surprise.
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
     errors.push(...piErrors);
+    const grokErrors = await verifyGrokRuntimeAvailable(rigSpec, preflightCtx.exec);
+    errors.push(...grokErrors);
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -438,6 +441,28 @@ export async function verifyPiRuntimeAvailable(
   } catch {
     return [
       `Runtime "pi" not available ('pi --version' failed). The spec declares a pi member, so the launch would fail. Fix: install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
+    ];
+  }
+}
+
+/**
+ * Async post-preflight probe, mirroring the Pi one: when the spec declares any `runtime: "grok"`
+ * member, verify the `grok` binary answers `grok --version`.
+ */
+export async function verifyGrokRuntimeAvailable(
+  rigSpec: PodRigSpec,
+  exec: ExecFn,
+): Promise<string[]> {
+  const hasGrokMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
+    (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "grok"),
+  );
+  if (!hasGrokMember) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["grok"]!);
+    return [];
+  } catch {
+    return [
+      `Runtime "grok" not available ('grok --version' failed). The spec declares a grok member, so the launch would fail. Fix: install the grok CLI and ensure 'grok' is on PATH.`,
     ];
   }
 }
