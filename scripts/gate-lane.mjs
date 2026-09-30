@@ -118,6 +118,13 @@ function invalidatePriorVerdict(verdictPath) {
 
 async function main() {
   const startedAt = new Date().toISOString();
+  // P3 guard: the port IS the lock name. Port 0 binds a random free port, so every gate would "win" and
+  // the machine-wide mutex would silently vanish; a non-numeric value is NaN. Refuse both, never run unlocked.
+  // (Tests may still pass port 0 to acquireGateLane directly; only this production entry refuses.)
+  if (!Number.isInteger(GATE_LANE_PORT) || GATE_LANE_PORT < 1 || GATE_LANE_PORT > 65535) {
+    console.error(`gate-lane: OPENRIG_GATE_LANE_PORT=${JSON.stringify(process.env.OPENRIG_GATE_LANE_PORT)} is not a fixed port (1-65535). Port 0 would disable the machine-wide gate lock; unset it to use the default 40404.`);
+    process.exit(2);
+  }
   const lane = await acquireGateLane({ port: GATE_LANE_PORT, holderInfoPath: HOLDER_INFO });
   if (!lane.ok) {
     console.error(renderRefusal(lane, GATE_LANE_PORT));

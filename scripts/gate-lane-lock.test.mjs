@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
 
 // F1 gate-lane (arch d6a6c1db; mechanism (B) bound-localhost-port, desk-concurred): a machine-wide
@@ -14,6 +16,7 @@ import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
 // PORT HYGIENE: every test binds port 0 and reuses the port the kernel handed back. Fixed ports
 // (45871–45876 until 2026-09-30) sit inside Linux's ephemeral range and are machine-wide, so two gates
 // running this suite at once (or any process that drew one of them) failed "release frees the lane".
+const HERE = dirname(fileURLToPath(import.meta.url));
 const info = () => join(mkdtempSync(join(tmpdir(), "gl-")), "holder.json");
 const listenAnywhere = async (server) => {
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -117,4 +120,25 @@ test("release frees the lane (kernel-released) so a subsequent acquire succeeds"
   const b = await acquireGateLane({ port: a.port, holderInfoPath: p });
   assert.equal(b.ok, true);
   await b.release();
+});
+
+test("the production entry (gate-lane.mjs) REFUSES port 0 / a non-port: port 0 would bind a random port and silently disable the lock", () => {
+  // Tests may pass port 0 to acquireGateLane directly (above); the gate itself must never run unlocked.
+  for (const bad of ["0", "abc", "70000"]) {
+    const scratch = mkdtempSync(join(tmpdir(), "gl-port0-"));
+    const r = spawnSync(process.execPath, [join(HERE, "gate-lane.mjs")], {
+      cwd: scratch,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TMPDIR: scratch, // holder-info lands in the scratch dir, never the machine's real one
+        OPENRIG_GATE_LANE_PORT: bad,
+        OPENRIG_GATE_LANE_SMOKE: "1",
+        OPENRIG_GATE_VERDICT: join(scratch, "verdict.json"),
+      },
+    });
+    assert.equal(r.status, 2, `OPENRIG_GATE_LANE_PORT=${bad} must refuse with exit 2 (got ${r.status}): ${r.stderr}`);
+    assert.match(r.stderr, /OPENRIG_GATE_LANE_PORT/, `the refusal must name the env var (${bad})`);
+    assert.equal(existsSync(join(scratch, "verdict.json")), false, "a refused gate writes no verdict");
+  }
 });
