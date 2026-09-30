@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -14,6 +14,31 @@ test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () =>
   assert.ok(
     files.some((f) => f.includes("scripts/check-abi.mjs")),
     `scripts/check-abi.mjs missing from npm pack output. Published tarball will fail postinstall.\nFiles found: ${files.filter((f) => f.includes("scripts")).join(", ") || "(none under scripts/)"}`
+  );
+});
+
+// RACE GUARD (fleet r1c-2, 2026-09-30). `node --test scripts/*.test.mjs` runs FILES in parallel. The
+// one file that RUNS build-package.sh rm -rf's and rebuilds packages/cli/{daemon,ui,tui} and recompiles
+// packages/daemon/dist, while its siblings read that same tree: the npm pack above walked
+// packages/cli/daemon mid-rm and died with ENOENT (1 in 72 runs beside a build loop), and
+// check-cli-daemon-freshness / generate-context-packs read the same outputs. So a test that runs the
+// packager must be a *.serial-test.mjs, which test:repo runs only after the parallel suite has finished.
+test("test:repo never runs build-package.sh beside the parallel scripts suite", () => {
+  const runsPackager = /(execFileSync|execSync|spawnSync|spawn)\([^)]*build-package\.sh/;
+  const parallel = readdirSync("scripts").filter((f) => f.endsWith(".test.mjs"));
+  const writers = parallel.filter((f) => runsPackager.test(readFileSync(`scripts/${f}`, "utf8")));
+  assert.deepEqual(writers, [], `these parallel tests run build-package.sh and race its readers; rename them to *.serial-test.mjs`);
+
+  const serial = readdirSync("scripts").filter((f) => f.endsWith(".serial-test.mjs"));
+  assert.ok(
+    serial.some((f) => runsPackager.test(readFileSync(`scripts/${f}`, "utf8"))),
+    "the package proof (build-package.sh + npm pack) must still run, as a *.serial-test.mjs",
+  );
+  const testRepo = JSON.parse(readFileSync("package.json", "utf8")).scripts["test:repo"];
+  assert.match(
+    testRepo,
+    /node --test scripts\/\*\.test\.mjs && node --test scripts\/\*\.serial-test\.mjs/,
+    "test:repo must run the serial tests AFTER the parallel suite (&&), never in the same node --test",
   );
 });
 

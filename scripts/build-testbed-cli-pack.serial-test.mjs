@@ -19,6 +19,10 @@ import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 //      CLEAN target: install + run a command that LOADS the daemon. It requires TARGET build tools
 //      because better-sqlite3 is NEVER prebuilt and builds fresh on target (desk caveat 1); on a host
 //      without them it stops at that native build, so the operator's Debian Docker rerun IS this gate.
+//
+// SERIAL (*.serial-test.mjs): build-package.sh rm -rf's and rebuilds packages/cli/{daemon,ui,tui} and
+// packages/daemon/dist, which sibling scripts tests read. test:repo runs this file only after the
+// parallel `node --test scripts/*.test.mjs` has finished (guarded in check-packing.test.mjs).
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
