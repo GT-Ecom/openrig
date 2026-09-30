@@ -28,6 +28,7 @@ import {
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
   type PiRunnerState,
 } from "./pi-runner-protocol.js";
+import { seedPiAgentDir } from "./pi-agent-template.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
@@ -55,6 +56,10 @@ export interface PiRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** Operator template dir (<OPENRIG_HOME>/pi-agent-template) whose
+   *  allowlisted files seed the seat's agent dir on every launch. Unset or
+   *  absent on disk: the agent dir is left as it is. */
+  agentTemplateDir?: string;
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
@@ -66,6 +71,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private trustPosture: "approve" | "no-approve";
   private sleep: (ms: number) => Promise<void>;
   private newLaunchId: () => string;
+  readonly agentTemplateDir?: string;
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.tmux = deps.tmux;
@@ -75,6 +81,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.trustPosture = deps.trustPosture ?? "no-approve";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
+    this.agentTemplateDir = deps.agentTemplateDir;
   }
 
   /** The pi-runner sidecar reader shape resume-token-capture consumes
@@ -220,6 +227,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const sessionName = binding.tmuxSession;
     const paths = piSeatPaths(this.stateRoot, sessionName);
     this.fs.mkdirp(paths.agentDir);
+    // Seed before the pending sidecar or any text reaches the pane.
+    if (this.agentTemplateDir) {
+      const seeded = seedPiAgentDir(this.agentTemplateDir, paths.agentDir);
+      if (!seeded.ok) {
+        return { ok: false, error: `pi launch: agent template: ${seeded.error}`, recovery: "attention_required" };
+      }
+    }
     this.fs.mkdirp(paths.sessionsDir);
 
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
