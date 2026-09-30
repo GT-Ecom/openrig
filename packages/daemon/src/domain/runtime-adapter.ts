@@ -127,6 +127,13 @@ export interface ForkSource {
 export interface RuntimeAdapter {
   readonly runtime: string;
 
+  /**
+   * "tui" (the default when absent) types send_text startup content after
+   * readiness. "launch" means the adapter consumes all startup text before
+   * or at launch and the orchestrator must never type it into the pane.
+   */
+  readonly startupTextDelivery?: "tui" | "launch";
+
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;
 
@@ -146,7 +153,7 @@ export interface RuntimeAdapter {
    */
   launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource; initialPrompt?: string },
   ): Promise<HarnessLaunchResult>;
 
   /** Check if the runtime harness is responsive and ready. */

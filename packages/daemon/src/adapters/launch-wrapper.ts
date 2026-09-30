@@ -15,6 +15,7 @@
 //   E <K=V>                 export a non-secret env assignment
 //   B <n> <argv1..argvn>    run a pre-launch step with </dev/null (non-zero exit aborts)
 //   A <flag> <path>         append `flag <file contents>` to the harness argv
+//   P <path>                append one positional argument read from a file
 //   F <fd> <path>           open <path> read-only onto <fd> (3..9)
 //   --                      the harness argv follows
 // Records run in that order: env, before steps (in a subshell, WITHOUT the credential fds, which
@@ -44,6 +45,8 @@ export interface WrappedLaunch {
   before?: string[][];
   /** Appends `flag <file contents>` to argv at launch. */
   argFiles?: { flag: string; path: string }[];
+  /** Appends the file contents as the final positional argv element. */
+  promptFile?: string;
 }
 
 const FD_OPEN_CASES = [3, 4, 5, 6, 7, 8, 9].map((n) => `${n}) exec ${n}<"$3";;`).join(" ");
@@ -54,6 +57,7 @@ export const FIXED_SCRIPT = [
   'E) export "$2"; shift 2;;',
   'B) n=$2; (shift 2; t=$#; i=0; while [ "$i" -lt "$t" ]; do i=$((i+1)); if [ "$i" -le "$n" ]; then set -- "$@" "$1"; fi; shift; done; exec "$@") </dev/null || { echo "openrig-launch: a pre-launch step failed; the harness was not started" >&2; exit 1; }; shift 2; shift "$n";;',
   'A) v=$(cat <"$3") || { echo "openrig-launch: cannot read the argument file for $2" >&2; exit 1; }; set -- "$@" "$2" "$v"; shift 3;;',
+  'P) v=$(cat <"$2") || { echo "openrig-launch: cannot read the prompt file" >&2; exit 1; }; set -- "$@" "$v"; shift 2;;',
   `F) if ! (: <"$3") 2>/dev/null; then echo "openrig-launch: cannot open the credential file for fd $2" >&2; exit 1; fi; case $2 in ${FD_OPEN_CASES} *) echo "openrig-launch: fd $2 is out of range" >&2; exit 1;; esac; shift 3;;`,
   "--) shift; break;;",
   '*) echo "openrig-launch: malformed launch record" >&2; exit 1;;',
@@ -94,6 +98,10 @@ export function buildWrappedLaunch(w: WrappedLaunch): string {
   for (const file of w.argFiles ?? []) {
     requireAbsolute(file.path, "argFile");
     operands.push("A", file.flag, file.path);
+  }
+  if (w.promptFile !== undefined) {
+    requireAbsolute(w.promptFile, "promptFile");
+    operands.push("P", w.promptFile);
   }
   const seen = new Set<number>();
   for (const cred of w.fds ?? []) {

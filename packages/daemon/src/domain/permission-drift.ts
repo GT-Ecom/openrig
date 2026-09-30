@@ -90,6 +90,7 @@ function runtimeCommand(runtime: string): string | null {
   if (runtime === "claude-code") return "claude";
   if (runtime === "codex") return "codex";
   if (runtime === "pi") return "pi";
+  if (runtime === "grok") return "grok";
   return null;
 }
 
@@ -218,7 +219,7 @@ function inspectLaunchBoundRuntime(
   runtime: string,
   applied: AppliedLaunchObservation | null,
 ): RuntimeEnforcementDiagnostic {
-  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust" : "not_applicable";
+  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust" : runtime === "grok" ? "permission" : "not_applicable";
   if (!applied || applied.runtime !== runtime || applied.axis !== axis || applied.state !== "observed" || !applied.value) {
     return unknownEnforcement(axis, null, null, applied?.reason ?? "applied_launch_unknown");
   }
