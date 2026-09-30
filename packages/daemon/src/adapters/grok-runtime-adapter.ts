@@ -29,6 +29,7 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { MANAGED_BLOCK_END, MANAGED_BLOCK_START } from "../domain/managed-blocks.js";
 import type { AppliedLaunchObservation } from "../domain/permission-drift.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -43,6 +44,20 @@ const OPENED_AT_TOLERANCE_MS = 5000;
 
 const POLL_MS = 250;
 const POLL_ATTEMPTS = 60; // ~15 s
+const GROK_SKILLS_BLOCK_ID = "openrig-grok-skills";
+
+function withSkillsBlock(existing: string, skillsDir: string, enabled: boolean): string {
+  const begin = MANAGED_BLOCK_START(GROK_SKILLS_BLOCK_ID);
+  const end = MANAGED_BLOCK_END(GROK_SKILLS_BLOCK_ID);
+  if (!enabled && !existing.includes(begin)) return existing;
+  const escapedBegin = begin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedEnd = end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const without = existing.replace(new RegExp(`(?:\\n|^)\\s*${escapedBegin}[\\s\\S]*?${escapedEnd}\\s*(?=\\n|$)`, "g"), "\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!enabled) return without.length > 0 ? `${without}\n` : "";
+  const content = `Skills for this seat are in ${skillsDir}. Each subdirectory holds a SKILL.md; read the one whose description matches your task before you start it.`;
+  const block = `${begin}\n${content}\n${end}`;
+  return without.length > 0 ? `${without}\n\n${block}\n` : `${block}\n`;
+}
 
 export interface GrokAdapterFsOps extends GrokFsOps {
   listFiles?(dirPath: string): string[];
@@ -93,6 +108,7 @@ export function grokSeatPaths(stateRoot: string, sessionName: string) {
   return {
     seatDir,
     standingInstructions: nodePath.join(seatDir, "standing-instructions.md"),
+    initialPrompt: nodePath.join(seatDir, "initial-prompt.md"),
     skillsDir: nodePath.join(seatDir, "skills"),
     sessionJson: nodePath.join(seatDir, "session.json"),
   };
@@ -100,6 +116,7 @@ export function grokSeatPaths(stateRoot: string, sessionName: string) {
 
 export class GrokRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "grok";
+  readonly startupTextDelivery = "launch";
   private tmux: TmuxAdapter;
   private fs: GrokAdapterFsOps;
   private stateRoot: string;
@@ -187,13 +204,23 @@ export class GrokRuntimeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource; initialPrompt?: string },
   ): Promise<HarnessLaunchResult> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch the grok harness" };
     }
     if (opts.resumeToken && opts.forkSource) {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
+    }
+    if (!nodePath.isAbsolute(this.grokHome)) {
+      return { ok: false, error: `grok launch: GROK_HOME must be absolute; received "${this.grokHome}"` };
+    }
+    if (opts.initialPrompt?.startsWith("-")) {
+      return { ok: false, error: "grok launch: the initial prompt must not start with '-' because it is a positional argument" };
+    }
+    const promptBytes = opts.initialPrompt === undefined ? 0 : Buffer.byteLength(opts.initialPrompt, "utf8");
+    if (promptBytes > GROK_MAX_STANDING_INSTRUCTIONS_BYTES) {
+      return { ok: false, error: `grok launch: the initial prompt is ${promptBytes} bytes, over the ${GROK_MAX_STANDING_INSTRUCTIONS_BYTES}-byte limit` };
     }
     let resumeId: string | undefined;
     if (opts.resumeToken) {
@@ -222,35 +249,34 @@ export class GrokRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: (err as Error).message };
     }
 
-    const hasRules = this.fs.exists(paths.standingInstructions);
-    if (hasRules) {
-      const size = byteSize(this.fs, paths.standingInstructions);
-      if (size > GROK_MAX_STANDING_INSTRUCTIONS_BYTES) {
-        return {
-          ok: false,
-          error: `grok launch: the standing-instructions file ${paths.standingInstructions} is ${size} bytes, over the ${GROK_MAX_STANDING_INSTRUCTIONS_BYTES}-byte limit (its contents are passed as one --rules argument)`,
-        };
+    let existingRules = "";
+    if (this.fs.exists(paths.standingInstructions)) {
+      try { existingRules = this.fs.readFile(paths.standingInstructions); } catch (err) {
+        return { ok: false, error: `grok launch: cannot read the standing-instructions file: ${(err as Error).message}` };
       }
     }
+    const hasSkills = !!this.fs.listFiles && this.fs.exists(paths.skillsDir) && this.fs.listFiles(paths.skillsDir).some((entry) => entry === "SKILL.md" || entry.endsWith("/SKILL.md"));
+    const nextRules = withSkillsBlock(existingRules, paths.skillsDir, hasSkills);
+    const rulesSize = Buffer.byteLength(nextRules, "utf8");
+    if (rulesSize > GROK_MAX_STANDING_INSTRUCTIONS_BYTES) {
+      return {
+        ok: false,
+        error: `grok launch: the standing-instructions file ${paths.standingInstructions} is ${rulesSize} bytes, over the ${GROK_MAX_STANDING_INSTRUCTIONS_BYTES}-byte limit (its contents are passed as one --rules argument)`,
+      };
+    }
+    const hasRules = nextRules.length > 0;
 
     const sessionId = resumeId ?? this.newSessionId();
     if (!isUuidShaped(sessionId)) {
       return { ok: false, error: "grok launch: the new session id is not a UUID" };
     }
 
-    // Hook, marker and launch baseline, all before anything is typed.
-    ensureGrokHookInstalled(this.fs, this.grokHome, this.stateRoot);
     const marker = grokMarkerPath(this.stateRoot, sessionId);
-    this.fs.mkdirp(nodePath.dirname(marker));
-    this.fs.writeFile(marker, "");
     const seat: SeatSession = {
       sessionId,
       eventsBaselineBytes: byteSize(this.fs, grokEventsPath(this.stateRoot, sessionId)),
       launchedAtMs: this.now(),
     };
-    this.fs.mkdirp(paths.seatDir);
-    this.fs.writeFile(paths.sessionJson, JSON.stringify(seat));
-    this.sessions.set(sessionName, seat);
 
     const argv = resumeId
       ? ["grok", "--resume", resumeId]
@@ -278,10 +304,25 @@ export class GrokRuntimeAdapter implements RuntimeAdapter {
         env,
         ...(this.authProviderCommand ? { before: [["grok", "login"]] } : {}),
         ...(hasRules ? { argFiles: [{ flag: "--rules", path: paths.standingInstructions }] } : {}),
+        ...(opts.initialPrompt !== undefined ? { promptFile: paths.initialPrompt } : {}),
       });
     } catch (err) {
       return { ok: false, error: `grok launch: ${(err as Error).message}` };
     }
+
+    // All refusals above are side-effect free. Commit launch state only after
+    // the complete launch has been validated.
+    if (nextRules !== existingRules || (hasRules && !this.fs.exists(paths.standingInstructions))) {
+      this.fs.mkdirp(paths.seatDir);
+      this.fs.writeFile(paths.standingInstructions, nextRules);
+    }
+    this.fs.mkdirp(paths.seatDir);
+    this.fs.writeFile(paths.initialPrompt, opts.initialPrompt ?? "");
+    ensureGrokHookInstalled(this.fs, this.grokHome, this.stateRoot);
+    this.fs.mkdirp(nodePath.dirname(marker));
+    this.fs.writeFile(marker, "");
+    this.fs.writeFile(paths.sessionJson, JSON.stringify(seat));
+    this.sessions.set(sessionName, seat);
 
     const textResult = await this.tmux.sendText(sessionName, line);
     if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };

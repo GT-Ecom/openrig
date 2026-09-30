@@ -141,6 +141,9 @@ export class StartupOrchestrator {
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
+    const launchTextDelivery = input.adapter.startupTextDelivery === "launch";
+    const consumedActions = new Set<StartupAction>();
+    let challenge: ReturnType<typeof issueStartupChallenge> | null = null;
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -186,7 +189,7 @@ export class StartupOrchestrator {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
         : f.deliveryHint;
-      if (hint === "send_text") {
+      if (hint === "send_text" && !launchTextDelivery) {
         postLaunchFiles.push(f);
       } else {
         preLaunchFiles.push(f);
@@ -230,10 +233,25 @@ export class StartupOrchestrator {
         let attemptedFreshFallback = false;
 
         while (true) {
+          let initialPrompt = "";
+          if (launchTextDelivery) {
+            const promptContext = continuityOutcome === "fresh" ? "fresh_start" : context;
+            const shouldIssueLaunchChallenge = continuityOutcome === "fresh"
+              && startupProof.mode === "authenticated";
+            if (shouldIssueLaunchChallenge && !challenge) {
+              challenge = issueStartupChallenge(this.eventBus, {
+                rigId: input.rigId,
+                nodeId: input.nodeId,
+                contractSource: JSON.stringify(input.resolvedStartupFiles),
+              });
+            }
+            initialPrompt = this.composeStartupText(input, promptContext, challenge?.promptBlock ?? null, consumedActions);
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
+            ...(initialPrompt ? { initialPrompt } : {}),
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
@@ -300,6 +318,7 @@ export class StartupOrchestrator {
     // if readiness later fails. Failed launches and resume/adopt retain history.
     const isFreshLaunch = continuityOutcome === "fresh" && (!input.skipHarnessLaunch || input.continueFreshStartup === true);
     const shouldChallenge = isFreshLaunch
+      && !(launchTextDelivery && input.skipHarnessLaunch)
       && input.adapter.runtime !== "terminal" && startupProof.mode === "authenticated";
     if (isFreshLaunch && !shouldChallenge) {
       this.eventBus.emit({
@@ -334,7 +353,7 @@ export class StartupOrchestrator {
     // Issue selected proof only once the runtime can receive its prompt.
     // Persist ground truth BEFORE delivering any proof prompt.
     const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
-    const challenge = shouldChallenge
+    if (!launchTextDelivery) challenge = shouldChallenge
       ? issueStartupChallenge(this.eventBus, {
           rigId: input.rigId,
           nodeId: input.nodeId,
@@ -344,16 +363,15 @@ export class StartupOrchestrator {
 
     // A selected proof still works without a session_identity action: deliver
     // its standalone prompt after the post-launch contract files below.
-    const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
-    if (continuityOutcome === "fresh" && identityAction) {
+    if (!launchTextDelivery && continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
-    } else if (challenge) {
+    } else if (!launchTextDelivery && challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
     }
 
@@ -369,7 +387,7 @@ export class StartupOrchestrator {
     // deliverInitialSessionPrompt identity+role.md bundle. Sequencing (not
     // timing) guarantees the preload precedes the role-triggered work turn; the
     // bundled actions are marked consumed so step 9 does not re-send them.
-    if (continuityOutcome !== "fresh") {
+    if (!launchTextDelivery && continuityOutcome !== "fresh") {
       const preloadActions = input.startupActions.filter(
         (a) =>
           !isSessionIdentityAction(a) &&
@@ -413,7 +431,7 @@ export class StartupOrchestrator {
     }
 
     // 8. Execute after_files actions
-    const afterFilesResult = await this.executeActions(input, "after_files");
+    const afterFilesResult = await this.executeActions(input, "after_files", consumedActions);
     if (!afterFilesResult.ok) {
       return this.fail(input, "failed", afterFilesResult.errors);
     }
@@ -560,6 +578,55 @@ export class StartupOrchestrator {
     return actions.find((action) => isSessionIdentityAction(action) && action.appliesOn.includes(context)) ?? null;
   }
 
+  private composeStartupText(
+    input: StartupInput,
+    context: "fresh_start" | "restore",
+    challengeBlock: string | null,
+    consumed: Set<StartupAction>,
+  ): string {
+    const parts: string[] = [];
+    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    if (context === "fresh_start" && identityAction) {
+      parts.push(identityAction.value);
+      if (input.includeDurableObligations) {
+        parts.push(`This is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${input.binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`);
+      }
+      if (challengeBlock) parts.push(challengeBlock);
+    } else if (context === "fresh_start" && challengeBlock) {
+      parts.push(challengeBlock);
+    }
+
+    if (context === "restore") {
+      for (const action of input.startupActions) {
+        if (
+          !isSessionIdentityAction(action)
+          && action.type === "send_text"
+          && action.phase === "after_ready"
+          && action.appliesOn.includes(context)
+          && action.idempotent
+        ) {
+          parts.push(action.value);
+          consumed.add(action);
+        }
+      }
+    }
+
+    for (const phase of ["after_files", "after_ready"] as const) {
+      for (const action of input.startupActions) {
+        if (action.type !== "send_text" || isSessionIdentityAction(action) || consumed.has(action)) continue;
+        if (action.phase !== phase || !action.appliesOn.includes(context)) continue;
+        if (context === "restore" && !action.idempotent) continue;
+        parts.push(action.value);
+        consumed.add(action);
+      }
+    }
+    return this.composeStartupTextParts(parts);
+  }
+
+  private composeStartupTextParts(parts: string[]): string {
+    return parts.filter((part) => part.length > 0).join("\n\n");
+  }
+
   private async deliverInitialSessionPrompt(
     binding: NodeBinding,
     identityAction: StartupAction,
@@ -580,7 +647,7 @@ export class StartupOrchestrator {
       try {
         const content = this.readFile(firstSendText.absolutePath);
         if (content.length > 0) {
-          prompt = `${identityAction.value}\n\n${content}`;
+          prompt = this.composeStartupTextParts([identityAction.value, content]);
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
         }
       } catch {
@@ -589,12 +656,12 @@ export class StartupOrchestrator {
       }
     }
 
-    if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
+    if (includeDurableObligations) prompt = this.composeStartupTextParts([prompt, `This is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`]);
 
     // OPR.0.4.3.06 — the per-launch orientation challenge rides along with the
     // identity prompt (after the contract) so no extra send is added.
     if (challengeBlock) {
-      prompt = `${prompt}\n\n${challengeBlock}`;
+      prompt = this.composeStartupTextParts([prompt, challengeBlock]);
     }
 
     const sendError = await this.sendInteractiveText(binding.tmuxSession, prompt);
@@ -640,7 +707,7 @@ export class StartupOrchestrator {
       }
     }
 
-    const sendError = await this.sendInteractiveText(binding.tmuxSession, parts.join("\n\n"));
+    const sendError = await this.sendInteractiveText(binding.tmuxSession, this.composeStartupTextParts(parts));
     if (sendError) {
       return { ok: false, error: `Restore preload prompt failed: ${sendError}` };
     }
