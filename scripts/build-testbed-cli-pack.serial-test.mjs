@@ -86,6 +86,21 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
   }
 });
 
+// Moved from check-packing.test.mjs, where it ran in the parallel suite BEFORE anything was assembled and
+// so always skipped on a fresh checkout. The package proof above has just run build-package.sh, so the
+// staged copy MUST exist here: missing is a failure, never a skip. A transforming or dropped copy step
+// would teach installed agents conventions the repo never said.
+test("staged conventions doc is byte-identical to the repo source (on the package the proof just assembled)", () => {
+  const staged = join(CLI_DIR, "daemon", "docs", "reference", "sdlc-conventions.md");
+  assert.ok(existsSync(staged), `${staged} is missing after build-package.sh: the daemon would never materialize $OPENRIG_HOME/reference/`);
+  const repoDoc = readFileSync(join(REPO_ROOT, "docs", "reference", "sdlc-conventions.md"));
+  const stagedDoc = readFileSync(staged);
+  assert.ok(
+    repoDoc.equals(stagedDoc),
+    `${staged} is not byte-identical to docs/reference/sdlc-conventions.md (repo ${repoDoc.length}B vs staged ${stagedDoc.length}B).`,
+  );
+});
+
 test("install RED (resident, docker-free): a clean install materializes a COMPLETE better-sqlite3 (binding.gyp present)", () => {
   // Q2 break #5 (historical: the daemon is no longer bundled): the BUNDLED @openrig/daemon package.json declared its cli-SUBSET deps
   // (better-sqlite3 + hono/tar/ulid/yaml/@hono/*), so `npm install -g` treated them as bundle-provided

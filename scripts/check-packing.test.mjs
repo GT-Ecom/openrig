@@ -23,22 +23,72 @@ test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () =>
 // packages/cli/daemon mid-rm and died with ENOENT (1 in 72 runs beside a build loop), and
 // check-cli-daemon-freshness / generate-context-packs read the same outputs. So a test that runs the
 // packager must be a *.serial-test.mjs, which test:repo runs only after the parallel suite has finished.
+// runsPackager(src): does this test source CALL a packager entry point? (Reading one as text is fine.)
+// Entry points: build-package.sh itself, the `build:package` npm script, build-testbed-image.sh (which
+// runs build-package.sh), and `npm publish` from packages/cli (prepublishOnly runs build-package.sh).
+// A call is a child_process call whose ARGUMENT TEXT (balanced parens) names an entry point, directly or
+// through a variable whose initializer does (followed transitively: const A = ...entry...; const B = A).
+const PACKAGER_ENTRY = /build-package\.sh|build:package|build-testbed-image\.sh|["'`]publish["'`\s]|npm publish/;
+const PROCESS_CALL = /\b(execFileSync|execSync|spawnSync|spawn|execFile|exec|fork)\s*\(/g;
+function callArgs(src, openParen) {
+  let depth = 0;
+  for (let i = openParen; i < src.length; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")" && --depth === 0) return src.slice(openParen + 1, i);
+  }
+  return src.slice(openParen + 1);
+}
+function runsPackager(src) {
+  const tainted = new Set();
+  const decls = [...src.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;]*)/g)];
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [, name, init] of decls) {
+      if (tainted.has(name)) continue;
+      if (PACKAGER_ENTRY.test(init) || [...tainted].some((t) => new RegExp(`\\b${t.replace(/\$/g, "\\$")}\\b`).test(init))) {
+        tainted.add(name);
+        grew = true;
+      }
+    }
+  }
+  for (const m of src.matchAll(PROCESS_CALL)) {
+    const args = callArgs(src, m.index + m[0].length - 1);
+    if (PACKAGER_ENTRY.test(args)) return true;
+    if ([...tainted].some((t) => new RegExp(`\\b${t.replace(/\$/g, "\\$")}\\b`).test(args))) return true;
+  }
+  return false;
+}
+
+// Fixtures are assembled at run time so this file's own source never contains a packager CALL.
+const X = "execFile" + "Sync";
+test("race guard catches `npm run build:package`", () => {
+  assert.equal(runsPackager(`${X}("npm", ["run", "build:package"], { cwd: REPO_ROOT });`), true);
+});
+test("race guard catches build-testbed-image.sh (which runs build-package.sh itself)", () => {
+  assert.equal(runsPackager(`${X}("bash", [join(HERE, "build-testbed-image.sh"), "--tag", "t"]);`), true);
+});
+test("race guard catches a packager path held in a variable", () => {
+  assert.equal(runsPackager(`const PKG = join(REPO_ROOT, "scripts", "build-package.sh");\n${X}("bash", [PKG]);`), true);
+});
+test("race guard does NOT flag a test that only READS the packager as text", () => {
+  assert.equal(runsPackager(`const t = readFileSync("scripts/build-package.sh", "utf8");\n${X}("npm", ["pack", "--dry-run"]);`), false);
+});
+
 test("test:repo never runs build-package.sh beside the parallel scripts suite", () => {
-  const runsPackager = /(execFileSync|execSync|spawnSync|spawn)\([^)]*build-package\.sh/;
   const parallel = readdirSync("scripts").filter((f) => f.endsWith(".test.mjs"));
-  const writers = parallel.filter((f) => runsPackager.test(readFileSync(`scripts/${f}`, "utf8")));
-  assert.deepEqual(writers, [], `these parallel tests run build-package.sh and race its readers; rename them to *.serial-test.mjs`);
+  const writers = parallel.filter((f) => runsPackager(readFileSync(`scripts/${f}`, "utf8")));
+  assert.deepEqual(writers, [], `these parallel tests run the packager and race its readers; rename them to *.serial-test.mjs`);
 
   const serial = readdirSync("scripts").filter((f) => f.endsWith(".serial-test.mjs"));
   assert.ok(
-    serial.some((f) => runsPackager.test(readFileSync(`scripts/${f}`, "utf8"))),
+    serial.some((f) => runsPackager(readFileSync(`scripts/${f}`, "utf8"))),
     "the package proof (build-package.sh + npm pack) must still run, as a *.serial-test.mjs",
   );
   const testRepo = JSON.parse(readFileSync("package.json", "utf8")).scripts["test:repo"];
   assert.match(
     testRepo,
-    /node --test scripts\/\*\.test\.mjs && node --test scripts\/\*\.serial-test\.mjs/,
-    "test:repo must run the serial tests AFTER the parallel suite (&&), never in the same node --test",
+    /node --test scripts\/\*\.test\.mjs && node --test --test-concurrency=1 scripts\/\*\.serial-test\.mjs/,
+    "test:repo must run the serial tests AFTER the parallel suite (&&), one file at a time, never in the same node --test",
   );
 });
 
@@ -166,20 +216,5 @@ test("build-package stages the conventions doc as the daemon's stable-path input
   );
 });
 
-// OPPORTUNISTIC, never required: when an assembled package happens to be present, verify the
-// staged copy really is byte-identical. Skipped (not failed) in a clean checkout, so this
-// cannot make `npm run test:repo` depend on build state — the contracts above are the
-// hermetic guarantee; this is the belt-and-braces check on an actual artifact.
-test("staged conventions doc is byte-identical to the repo source (skipped when no assembled package present)", (t) => {
-  const staged = "packages/cli/daemon/docs/reference/sdlc-conventions.md";
-  if (!existsSync(staged)) {
-    t.skip("no assembled package at packages/cli/daemon — run scripts/build-package.sh to exercise this check");
-    return;
-  }
-  const repoDoc = readFileSync("docs/reference/sdlc-conventions.md");
-  const stagedDoc = readFileSync(staged);
-  assert.ok(
-    repoDoc.equals(stagedDoc),
-    `${staged} is not byte-identical to docs/reference/sdlc-conventions.md (repo ${repoDoc.length}B vs staged ${stagedDoc.length}B). Re-run scripts/build-package.sh; a drifted staged copy teaches installed agents stale conventions.`
-  );
-});
+// The byte-identical check on the ASSEMBLED package lives in build-testbed-cli-pack.serial-test.mjs,
+// right after the package proof builds it, so it runs on every fresh checkout instead of skipping here.
