@@ -17,6 +17,7 @@ import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
 } from "./pi-runner-protocol.js";
 import { observePiResourceTrust } from "../domain/permission-drift.js";
+import { seedPiAgentDir } from "./pi-agent-template.js";
 
 export { type ResumeResult };
 
@@ -34,6 +35,8 @@ interface PiResumeOptions {
   trustPosture?: "approve" | "no-approve";
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** Operator template dir seeding the seat's agent dir (same as the launch adapter). */
+  agentTemplateDir?: string;
 }
 
 export class PiResumeAdapter {
@@ -70,6 +73,12 @@ export class PiResumeAdapter {
 
     const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
     this.fs.mkdirp(seat.agentDir);
+    if (this.options.agentTemplateDir) {
+      const seeded = seedPiAgentDir(this.options.agentTemplateDir, seat.agentDir);
+      if (!seeded.ok) {
+        return { ok: false, code: "resume_failed", message: `pi resume: agent template: ${seeded.error}` };
+      }
+    }
     this.fs.mkdirp(seat.sessionsDir);
 
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
