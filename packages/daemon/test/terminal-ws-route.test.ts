@@ -3,11 +3,22 @@ import { Hono } from "hono";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { serve, type ServerType } from "@hono/node-server";
 import http from "node:http";
+import { once } from "node:events";
+import type { AddressInfo, Server as NetServer } from "node:net";
 import * as fs from "node:fs";
 import { registerTerminalWs } from "../src/routes/terminal-ws.js";
 
 const TOKEN = "test-ws-route-token";
-const PORT = 19876;
+// PORT HYGIENE: every server here binds port 0 and the tests use the port the kernel handed back.
+// Fixed ports (19876-19881 until 2026-09-30) are machine-wide, so two gates running this suite on one
+// host at once failed with EADDRINUSE.
+let PORT = 0;
+
+async function boundPort(server: ServerType): Promise<number> {
+  const s = server as unknown as NetServer;
+  if (!s.listening) await once(s, "listening");
+  return (s.address() as AddressInfo).port;
+}
 
 let server: ServerType;
 
@@ -27,9 +38,10 @@ beforeAll(async () => {
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
-  server = serve({ fetch: app.fetch, port: PORT, hostname: "127.0.0.1" });
+  server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
   injectWebSocket(server);
   await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  PORT = await boundPort(server);
 });
 
 afterAll(() => {
@@ -100,7 +112,7 @@ describe("terminal WebSocket route (production path)", () => {
 });
 
 describe("terminal WebSocket input ordering", () => {
-  const ORDER_PORT = 19878;
+  let ORDER_PORT = 0; // kernel-assigned in beforeAll
   const ORDER_TOKEN = "order-test-token";
   let orderServer: ServerType;
   const textCompletions: string[] = [];
@@ -125,9 +137,10 @@ describe("terminal WebSocket input ordering", () => {
     });
     const { injectWebSocket: inject3, upgradeWebSocket: upgrade3 } = createNodeWebSocket({ app: app3 });
     registerTerminalWs(app3, upgrade3 as never, { bearerToken: ORDER_TOKEN });
-    orderServer = serve({ fetch: app3.fetch, port: ORDER_PORT, hostname: "127.0.0.1" });
+    orderServer = serve({ fetch: app3.fetch, port: 0, hostname: "127.0.0.1" });
     inject3(orderServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    ORDER_PORT = await boundPort(orderServer);
   });
 
   afterAll(() => {
@@ -154,7 +167,7 @@ describe("terminal WebSocket input ordering", () => {
 });
 
 describe("terminal WebSocket lifecycle (session death)", () => {
-  const LIFECYCLE_PORT = 19877;
+  let LIFECYCLE_PORT = 0; // kernel-assigned in beforeAll
   const LIFECYCLE_TOKEN = "lifecycle-test-token";
   let lifecycleServer: ServerType;
   let sessionAlive = true;
@@ -176,9 +189,10 @@ describe("terminal WebSocket lifecycle (session death)", () => {
     });
     const { injectWebSocket: inject2, upgradeWebSocket: upgrade2 } = createNodeWebSocket({ app: app2 });
     registerTerminalWs(app2, upgrade2 as never, { bearerToken: LIFECYCLE_TOKEN, livenessIntervalMs: 100 });
-    lifecycleServer = serve({ fetch: app2.fetch, port: LIFECYCLE_PORT, hostname: "127.0.0.1" });
+    lifecycleServer = serve({ fetch: app2.fetch, port: 0, hostname: "127.0.0.1" });
     inject2(lifecycleServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    LIFECYCLE_PORT = await boundPort(lifecycleServer);
   });
 
   afterAll(() => {
@@ -215,7 +229,7 @@ describe("terminal WebSocket lifecycle (session death)", () => {
 // subscribers of one session share ONE pipe and a fanned-out stream, and a
 // client resize message never reaches the pane (FR-7 fixed geometry).
 describe("terminal WebSocket broker (multi-subscriber route)", () => {
-  const BROKER_PORT = 19879;
+  let BROKER_PORT = 0; // kernel-assigned in beforeAll
   const BROKER_TOKEN = "broker-test-token";
   let brokerServer: ServerType;
   const startPipePaneCalls: string[] = [];
@@ -247,9 +261,10 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
     });
     const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
     registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: BROKER_TOKEN });
-    brokerServer = serve({ fetch: app.fetch, port: BROKER_PORT, hostname: "127.0.0.1" });
+    brokerServer = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
     injectWebSocket(brokerServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    BROKER_PORT = await boundPort(brokerServer);
   });
 
   afterAll(() => {
@@ -312,7 +327,7 @@ describe("terminal WebSocket broker (multi-subscriber route)", () => {
 // WebSocket that closes WHILE the async broker attach is still in flight must
 // not leave a phantom subscriber holding the pipe open.
 describe("terminal WebSocket detach-during-attach race", () => {
-  const RACE_PORT = 19880;
+  let RACE_PORT = 0; // kernel-assigned in beforeAll
   const RACE_TOKEN = "race-test-token";
   let raceServer: ServerType;
   const stopPipePaneCalls: string[] = [];
@@ -342,9 +357,10 @@ describe("terminal WebSocket detach-during-attach race", () => {
     });
     const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
     registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: RACE_TOKEN });
-    raceServer = serve({ fetch: app.fetch, port: RACE_PORT, hostname: "127.0.0.1" });
+    raceServer = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
     injectWebSocket(raceServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    RACE_PORT = await boundPort(raceServer);
   });
 
   afterAll(() => {
@@ -378,7 +394,7 @@ describe("terminal WebSocket detach-during-attach race", () => {
 // one pre-populated CHAT frame was lost every time attach was slower than the
 // client. The route must buffer early frames and drain them post-attach.
 describe("terminal WebSocket send-at-open buffering (initialText race)", () => {
-  const EARLY_PORT = 19881;
+  let EARLY_PORT = 0; // kernel-assigned in beforeAll
   const EARLY_TOKEN = "early-frame-test-token";
   let earlyServer: ServerType;
   const sentTexts: string[] = [];
@@ -406,9 +422,10 @@ describe("terminal WebSocket send-at-open buffering (initialText race)", () => {
     });
     const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
     registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: EARLY_TOKEN });
-    earlyServer = serve({ fetch: app.fetch, port: EARLY_PORT, hostname: "127.0.0.1" });
+    earlyServer = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
     injectWebSocket(earlyServer);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    EARLY_PORT = await boundPort(earlyServer);
   });
 
   afterAll(() => {

@@ -25,7 +25,9 @@ import { dirname } from "node:path";
 export const GATE_LANE_PORT = Number.parseInt(process.env.OPENRIG_GATE_LANE_PORT ?? "40404", 10);
 
 /**
- * @returns {Promise<{ok:true, release:()=>Promise<void>} | {ok:false, reason:"gate-holder"|"foreign-holder"|"bind-error", holder?:{pid:number,startedAt:string}, message?:string}>}
+ * `port` on success is the port actually bound (port 0 → the kernel-assigned one), so tests can hold a
+ * lane without claiming a fixed machine-wide port.
+ * @returns {Promise<{ok:true, port:number, release:()=>Promise<void>} | {ok:false, reason:"gate-holder"|"foreign-holder"|"bind-error", holder?:{pid:number,startedAt:string}, message?:string}>}
  */
 export async function acquireGateLane({ port = GATE_LANE_PORT, holderInfoPath }) {
   // P1 + P2: bind 127.0.0.1 explicitly; do NOT pass reusePort — exclusivity is the mutex.
@@ -63,5 +65,5 @@ export async function acquireGateLane({ port = GATE_LANE_PORT, holderInfoPath })
       try { unlinkSync(holderInfoPath); } catch { /* best-effort */ }
       server.close(() => resolve());
     });
-  return { ok: true, release };
+  return { ok: true, port: server.address().port, release };
 }

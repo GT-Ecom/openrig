@@ -19,6 +19,10 @@ import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 //      CLEAN target: install + run a command that LOADS the daemon. It requires TARGET build tools
 //      because better-sqlite3 is NEVER prebuilt and builds fresh on target (desk caveat 1); on a host
 //      without them it stops at that native build, so the operator's Debian Docker rerun IS this gate.
+//
+// SERIAL (*.serial-test.mjs): build-package.sh rm -rf's and rebuilds packages/cli/{daemon,ui,tui} and
+// packages/daemon/dist, which sibling scripts tests read. test:repo runs this file only after the
+// parallel `node --test scripts/*.test.mjs` has finished (guarded in check-packing.test.mjs).
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
@@ -80,6 +84,21 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
     rmSync(tgzPath, { force: true });
     rmSync(extract, { recursive: true, force: true });
   }
+});
+
+// Moved from check-packing.test.mjs, where it ran in the parallel suite BEFORE anything was assembled and
+// so always skipped on a fresh checkout. The package proof above has just run build-package.sh, so the
+// staged copy MUST exist here: missing is a failure, never a skip. A transforming or dropped copy step
+// would teach installed agents conventions the repo never said.
+test("staged conventions doc is byte-identical to the repo source (on the package the proof just assembled)", () => {
+  const staged = join(CLI_DIR, "daemon", "docs", "reference", "sdlc-conventions.md");
+  assert.ok(existsSync(staged), `${staged} is missing after build-package.sh: the daemon would never materialize $OPENRIG_HOME/reference/`);
+  const repoDoc = readFileSync(join(REPO_ROOT, "docs", "reference", "sdlc-conventions.md"));
+  const stagedDoc = readFileSync(staged);
+  assert.ok(
+    repoDoc.equals(stagedDoc),
+    `${staged} is not byte-identical to docs/reference/sdlc-conventions.md (repo ${repoDoc.length}B vs staged ${stagedDoc.length}B).`,
+  );
 });
 
 test("install RED (resident, docker-free): a clean install materializes a COMPLETE better-sqlite3 (binding.gyp present)", () => {
