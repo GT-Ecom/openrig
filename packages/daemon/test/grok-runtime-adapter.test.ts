@@ -94,6 +94,8 @@ const typedLines = (tmux: ReturnType<typeof fakeTmux>) => tmux.sendText.mock.cal
 const errno = (code: string) => Object.assign(new Error(code), { code });
 
 const FLOOR = ["--permission-mode", "acceptEdits"];
+// Without it grok blocks on its folder-trust prompt in any cwd holding project config.
+const TRUST = ["--trust-folder"];
 
 describe("GrokRuntimeAdapter.deliverStartup", () => {
   const files: ResolvedStartupFile[] = [
@@ -152,7 +154,7 @@ describe("GrokRuntimeAdapter.launchHarness argv", () => {
     const tmux = fakeTmux({ onEnter: () => appendEvent(fsOps, "session_start", SID) });
     const r = await adapter(fsOps, tmux).launchHarness(binding({ model: "grok-4" }), { name: "seat" });
     expect(r).toMatchObject({ ok: true, resumeToken: SID, resumeType: "grok_id" });
-    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--session-id", SID, ...FLOOR, "-m", "grok-4"])]);
+    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--session-id", SID, ...TRUST, ...FLOOR, "-m", "grok-4"])]);
     expect(tmux.sendKeys).toHaveBeenCalledWith(SESSION, ["Enter"]);
     expect(typedLines(tmux)[0]).not.toContain("bypassPermissions");
   });
@@ -162,7 +164,7 @@ describe("GrokRuntimeAdapter.launchHarness argv", () => {
     const tmux = fakeTmux({ onEnter: () => appendEvent(fsOps, "session_start", TOKEN) });
     const r = await adapter(fsOps, tmux).launchHarness(binding(), { name: "seat", resumeToken: TOKEN });
     expect(r).toMatchObject({ ok: true, resumeToken: TOKEN, resumeType: "grok_id" });
-    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--resume", TOKEN, ...FLOOR])]);
+    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--resume", TOKEN, ...TRUST, ...FLOOR])]);
     expect(typedLines(tmux)[0]).not.toMatch(/'-c'|'--continue'/);
   });
 
@@ -171,7 +173,7 @@ describe("GrokRuntimeAdapter.launchHarness argv", () => {
     const tmux = fakeTmux({ onEnter: () => appendEvent(fsOps, "session_start", SID) });
     const r = await adapter(fsOps, tmux).launchHarness(binding(), { name: "seat", forkSource: { kind: "native_id", value: PARENT } });
     expect(r).toMatchObject({ ok: true, resumeToken: SID, resumeType: "grok_id" });
-    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--resume", PARENT, "--fork-session", "--session-id", SID, ...FLOOR])]);
+    expect(typedLines(tmux)).toEqual([expectLine(["grok", "--resume", PARENT, "--fork-session", "--session-id", SID, ...TRUST, ...FLOOR])]);
   });
 
   it("full_bypass carries --permission-mode bypassPermissions; auth adds the provider env and a login step", async () => {
@@ -180,7 +182,7 @@ describe("GrokRuntimeAdapter.launchHarness argv", () => {
     const r = await adapter(fsOps, tmux, { authProviderCommand: "print-token --x" }).launchHarness(binding({ launchPosture: "full_bypass" }), { name: "seat" });
     expect(r.ok).toBe(true);
     expect(typedLines(tmux)).toEqual([
-      expectLine(["grok", "--session-id", SID, "--permission-mode", "bypassPermissions"], {
+      expectLine(["grok", "--session-id", SID, ...TRUST, "--permission-mode", "bypassPermissions"], {
         env: { GROK_AUTH_PROVIDER_COMMAND: "print-token --x" },
         before: [["grok", "login"]],
         rules: false,
