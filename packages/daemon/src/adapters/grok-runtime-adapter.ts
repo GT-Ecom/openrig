@@ -283,6 +283,11 @@ export class GrokRuntimeAdapter implements RuntimeAdapter {
       : parentId
         ? ["grok", "--resume", parentId, "--fork-session", "--session-id", sessionId]
         : ["grok", "--session-id", sessionId];
+    // grok asks "Do you trust the contents of this directory?" before it starts in any cwd that
+    // holds project config (.claude/settings.json and the like), and no permission mode skips it,
+    // --dangerously-skip-permissions included. Trust is per exact path and not inherited from a
+    // parent entry, so every launch (fresh, resume and fork) passes --trust-folder.
+    argv.push("--trust-folder");
     // The same floor/bypass decision Claude gets (global YOLO or the seat's resolved posture).
     const fullBypass = yoloEnabled(process.env, binding.launchPosture);
     argv.push("--permission-mode", fullBypass ? "bypassPermissions" : "acceptEdits");
